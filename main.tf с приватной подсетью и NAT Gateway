@@ -1,0 +1,338 @@
+# Определение провайдера
+provider "aws" {
+  region = "eu-central-1"
+}
+
+# Создание VPC
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/18"
+  tags = {
+    Name = "main-vpc"
+  }
+}
+
+# Создание публичной подсети
+resource "aws_subnet" "public_subnet" {
+  vpc_id     = aws_vpc.main.id
+  cidr_block = "10.0.1.0/24"
+  availability_zone = "eu-central-1a"
+  tags = {
+    Name = "public-subnet"
+  } 
+}
+# Создание приватной подсети
+resource "aws_subnet" "private_subnet" {
+  vpc_id     = aws_vpc.main.id
+  cidr_block = "10.0.2.0/24"
+  availability_zone = "eu-central-1a"
+  tags = {
+    Name = "private-subnet"
+  }
+}
+
+# Создание Internet Gateway
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+}
+
+# Создание маршрутизационной таблицы для публичной подсети
+resource "aws_route_table" "public_route_table" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name = "public-route-table"
+  }
+}
+
+# Ассоциация маршрутизационной таблицы с публичной подсетью
+resource "aws_route_table_association" "public_route_table_association" {
+  subnet_id      = aws_subnet.public_subnet.id
+  route_table_id = aws_route_table.public_route_table.id
+}
+
+# Создание Elastic IP для NAT Gateway
+resource "aws_eip" "nat" {
+  domain = "vpc"
+}
+
+# Создание NAT Gateway в публичной подсети
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public_subnet.id
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+# Создание маршрутизационной таблицы для приватной подсети
+resource "aws_route_table" "private_route_table" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = {
+    Name = "private-route-table"
+  }
+}
+
+# Ассоциация маршрутизационной таблицы с приватной подсетью
+resource "aws_route_table_association" "private_route_table_association" {
+  subnet_id      = aws_subnet.private_subnet.id
+  route_table_id = aws_route_table.private_route_table.id
+}
+
+# Создание security group с доступом по SSH (порт 22)
+resource "aws_security_group" "allow_ssh" {
+  vpc_id = aws_vpc.main.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Создание 3 EC2-инстансов
+resource "aws_instance" "example" {
+  count         = 3
+  ami           = "ami-04f76ebf53292ef4d"
+  instance_type = "t2.micro"               
+  subnet_id     = aws_subnet.private_subnet.id
+  vpc_security_group_ids = [aws_security_group.allow_ssh.id]
+
+  tags = {
+    Name = "example-instance-${count.index}"
+  }
+}
+
+# в приватной подсети инстансы не могут иметь elastic ip
+
+# Добавление Auto Scaling group
+
+# Добавляем Launch Template (не Launch Configuration!!!) +ASG игнорит инстансы, которые были созданы вручную!!!Поэтому удаляем resource "aws_instance"
+
+# Создание Launch Template
+resource "aws_launch_template" "example" {
+  name_prefix   = "example-launch-template"
+  image_id      = "ami-04f76ebf53292ef4d"
+  instance_type = "t2.micro"
+
+  network_interfaces {
+    associate_public_ip_address = false #потому что приватная подсеть
+    security_groups             = [aws_security_group.allow_ssh.id]
+    subnet_id                   = aws_subnet.private_subnet.id
+  }
+
+  tags = {
+    Name = "example-instance"
+  }
+}
+
+# Создание Auto Scaling Group
+resource "aws_autoscaling_group" "example" {
+  launch_template {
+    id      = aws_launch_template.example.id
+    version = "$Latest" #пока ок, потому что нет других версий, но потом надо поставить конкретную  версию
+  }
+
+  min_size           = 3
+  max_size           = 4
+  desired_capacity   = 3
+  vpc_zone_identifier = [aws_subnet.private_subnet.id] #параметр задаёт подсети (или зоны доступности), в которых Auto Scaling Group будет запускать и масштабировать EC2-инстансы
+
+  tag {
+    key                 = "Name" #создание пары значений для тега
+    value               = "my-instance"
+
+    propagate_at_launch = true #тег будет применен ко всем инстансам которые запустились с ASG (одинаковый тег)
+  }
+
+  lifecycle {
+    create_before_destroy = true #при замене инстансов: перед удалением инстансов создаст новые, чтобы не было простоя (downtime) 
+  }
+}
+# Load Balancer
+
+Должен быть развернут в 2 подсетях разных зон доступности для отказоустойчивости (у меня в 2 приватных)
+
+Создаем вторую приватную подсеть
+resource "aws_subnet" "private_subnet_2" {
+  vpc_id     = aws_vpc.main.id
+  cidr_block = "10.0.3.0/24"  # CIDR блок не пересекается с другими подсетями
+  availability_zone = "eu-central-1b"  # Выбереме другую зону доступности
+  tags = {
+    Name = "private-subnet-2"
+  }
+}
+
+Выбираю ALB, добавим для него security group 
+
+# Security Group для ALB
+resource "aws_security_group" "alb_sg" {
+  vpc_id = aws_vpc.main.id
+  
+  ingress {
+    from_port   = 80    # HTTP
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]  # Разрешаем доступ к ALB для всех IP
+  }
+
+  ingress {
+    from_port   = 443   # HTTPS
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]  # HTTPS для всех IP
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]  # Разрешаем исходящий трафик на любые порты
+  }
+
+  tags = {
+    Name = "alb-sg"
+  }
+}
+
+# Хочу сделать балансировщик приватным, чтобы меньше настраивать
+
+# Создание приватного Application Load Balancer (ALB)
+resource "aws_lb" "private_alb" {
+  name               = "private-alb"
+  internal           = true    # Приватный ALB
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb_sg.id]  # Применяем Security Group для ALB
+  subnets            = [aws_subnet.private_subnet.id, aws_subnet.private_subnet_2.id]  # Указываем приватные подсети
+
+  tags = {
+    Name = "private-alb"
+  }
+}
+
+# Теперь настраиваем Target group(это будут наши инстансы)
+
+# Target Group для ALB
+resource "aws_lb_target_group" "private_tg" {
+  name     = "private-target-group"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    path                = "/" #базовый путь для отправки запроса на инстанс 
+    interval            = 30 #каждые 30 сек 
+    timeout             = 5 #время ожидания, >5 сек- проверка провалена
+    healthy_threshold   = 5 #Количество успешных проверок, которые целевой инстанс должен пройти, чтобы считаться здоровым
+    unhealthy_threshold = 2 #Количество неудачных проверок, которые целевой инстанс должен пройти, чтобы считаться нездоровым
+    matcher             = "200" #желаемый код ответа после запроса на корневую директорию инстанса
+  }
+
+  tags = {
+    Name = "private-target-group"
+  }
+}
+
+# Настройка Listener 
+
+# Listener для ALB
+resource "aws_lb_listener" "private_listener" {
+  load_balancer_arn = aws_lb.private_alb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward" #перенаправление на целевую группу
+    target_group_arn = aws_lb_target_group.private_tg.arn #Указывает на ARN (Amazon Resource Name) целевой группы
+  }
+
+  tags = {
+    Name = "private-listener"
+  }
+}
+
+# Привязка балансировщика к ASG
+добавляем в ASG : 
+-новую подсеть vpc_zone_identifier = [aws_subnet.private_subnet.id, aws_subnet.private_subnet_2.id]
+-привязку к Target Group 
+target_group_arns = [aws_lb_target_group.private_tg.arn]
+
+#RDS- выбираю PostgreSQL
+
+#Слишком много security groups становится,  но общую лучше не делать из-за принципа минимальных привилегий
+# Security Group для базы данных RDS
+resource "aws_security_group" "rds_sg" {
+  vpc_id = aws_vpc.main.id
+
+  ingress { # Разрешаем входящие подключения на PostgreSQL (порт 5432) для базы данных RDS
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/18"]  # Разрешаем только для внутренних подсетей VPC
+  }
+
+  egress { # Разрешаем исходящий трафик на любые порты для всех сервисов
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "rds-sg"
+  }
+}
+
+
+#Настраиваем саму БД 
+
+# Настройка для базы данных RDS (PostgreSQL)
+resource "aws_db_instance" "postgres_instance" {
+  allocated_storage    = 20 # ГБ
+  engine               = "postgres"
+  engine_version       = "16.3"
+  instance_class       = "db.t4g.micro"
+  db_name              = "mydb"
+  username             = "Mary"
+  password             = "zefir50612"
+  parameter_group_name = "default.postgres16"
+  skip_final_snapshot  = true
+  publicly_accessible  = false
+  vpc_security_group_ids = [aws_security_group.rds_sg.id]
+  db_subnet_group_name = aws_db_subnet_group.rds_subnet_group.name
+
+  tags = {
+    Name = "rds-postgres"
+  }
+}
+
+#привязываем БД к нашим приватным подсетям 
+# Подсети для RDS (используем приватные подсети)
+resource "aws_db_subnet_group" "rds_subnet_group" {
+  name       = "rds-subnet-group"  # Название группы подсетей
+  subnet_ids = [aws_subnet.private_subnet.id, aws_subnet.private_subnet_2.id]  # Привязываем приватные подсети, чтобы инстансы были изолированы
+
+  tags = {
+    Name = "rds-subnet-group"
+  }
+} 
+
+
+
