@@ -1,0 +1,92 @@
+# Определение провайдера
+provider "aws" {
+  region = "eu-central-1"
+}
+
+# Создание VPC
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/18"
+  tags = {
+    Name = "main-vpc"
+  }
+}
+
+# Создание подсети (Subnet)
+resource "aws_subnet" "subnet_1" {
+  vpc_id     = aws_vpc.main.id
+  cidr_block = "10.0.1.0/24"
+  tags = {
+    Name = "subnet_1"
+  }
+}
+
+# Создание интернет-шлюза (Internet Gateway) для доступа в интернет
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+}
+
+# Создание маршрутизационной таблицы (Route Table) для связи с интернетом
+resource "aws_route_table" "main" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0" 
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name = "main-route-table"
+  }
+}
+
+# Ассоциация таблицы маршрутизации с подсетью
+resource "aws_route_table_association" "main" {
+  subnet_id      = aws_subnet.subnet_1.id
+  route_table_id = aws_route_table.main.id
+}
+
+# Создание security group с доступом по SSH (порт 22)
+resource "aws_security_group" "allow_ssh" {
+  vpc_id = aws_vpc.main.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Создание 3 EC2-инстансов
+resource "aws_instance" "example" {
+  count         = 3
+  ami           = "ami-04f76ebf53292ef4d"
+  instance_type = "t2.micro"               
+  subnet_id     = aws_subnet.subnet_1.id
+  vpc_security_group_ids = [aws_security_group.allow_ssh.id]
+
+  tags = {
+    Name = "example-instance-${count.index}"
+  }
+}
+
+# Создание статического Elastic IP для каждого инстанса
+resource "aws_eip" "example_ip" {
+  count      = 3
+  instance   = aws_instance.example[count.index].id
+  depends_on = [aws_internet_gateway.main]  # Шлюз должен быть создан раньше
+}
+
+# Определение вывода  для статических публичных Elastic IP адресов
+output "instance_public_ips" {
+  value = aws_instance.example[*].public_ip
+  description = "Список публичных IP адресов EC2 инстансов"
+}
+
