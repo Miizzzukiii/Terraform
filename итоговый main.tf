@@ -66,6 +66,12 @@ resource "aws_route_table_association" "public_route_table_association" {
   route_table_id = aws_route_table.public_route_table.id
 }
 
+# Ассоциация маршрутизационной таблицы с приватной подсетью 2
+resource "aws_route_table_association" "private2_route_table_association" {
+  subnet_id      = aws_subnet.private_subnet_2.id
+  route_table_id = aws_route_table.private_route_table.id
+}
+
 # Создание Elastic IP для NAT Gateway
 resource "aws_eip" "nat" {
   domain = "vpc"
